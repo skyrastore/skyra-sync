@@ -42,6 +42,7 @@ async function syncCategory(categoryLabel, fetcher, category) {
       name: item.name,
       publisher: item.publisher || null,
       icon_emoji: "🎮",
+      image_url: item.image || null,
       color_theme: "default",
       category,
       input_type: category === "voucher" ? "none" : category === "ppob" ? "user_id" : "user_id",
