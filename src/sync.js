@@ -70,18 +70,15 @@ async function syncCategory(categoryLabel, fetcher, category) {
     const isNewGame = new Date(upsertedGame.created_at) > new Date(Date.now() - 60000);
     if (isNewGame) newGames++; else updatedGames++;
 
-    // 2. UPSERT products (denom)
+    // 2. UPSERT products (denom) — dedupe by (game_id, name, price_idr) first
+    const seenDenoms = new Set();
     for (const denom of item.denom || []) {
+      if (!denom.id) continue; // skip if no supplier_sku (prevents null-dupe)
+      if (seenDenoms.has(denom.id)) continue; // skip dupes in same API response
+      seenDenoms.add(denom.id);
+
       const cost = Number(denom.price);
       const sell = sellPrice(cost);
-
-      // Check existing by supplier_sku
-      const { data: existing } = await supabase
-        .from("products")
-        .select("id")
-        .eq("supplier_sku", denom.id)
-        .eq("supplier", "uniplay")
-        .maybeSingle();
 
       const productData = {
         game_id: upsertedGame.id,
@@ -91,33 +88,30 @@ async function syncCategory(categoryLabel, fetcher, category) {
         price_idr: sell,
         cost_idr: cost,
         supplier: "uniplay",
-        supplier_sku: denom.id,
+        supplier_sku: String(denom.id),
         notes: `[uniplay/${category}] ${item.name}`,
         is_hot: false,
         is_available: true,
         sort_order: 0,
       };
 
-      if (existing) {
-        const { error } = await supabase
-          .from("products")
-          .update(productData)
-          .eq("id", existing.id);
-        if (!error) {
-          syncedProductIds.add(existing.id);
-          updatedProducts++;
-        }
-      } else {
-        const { data: inserted, error } = await supabase
-          .from("products")
-          .insert(productData)
-          .select("id")
-          .single();
-        if (!error && inserted) {
-          syncedProductIds.add(inserted.id);
-          newProducts++;
-        }
+      // Upsert by (supplier, supplier_sku) — needs unique index
+      const { data: upserted, error } = await supabase
+        .from("products")
+        .upsert(productData, {
+          onConflict: "supplier,supplier_sku",
+          ignoreDuplicates: false,
+        })
+        .select("id, created_at")
+        .single();
+
+      if (error) {
+        console.error(`  ✗ Product error (${denom.package}):`, error.message);
+        continue;
       }
+      syncedProductIds.add(upserted.id);
+      const isNew = new Date(upserted.created_at) > new Date(Date.now() - 60000);
+      if (isNew) newProducts++; else updatedProducts++;
     }
   }
 
