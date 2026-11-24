@@ -70,18 +70,20 @@ async function syncCategory(categoryLabel, fetcher, category) {
     const isNewGame = new Date(upsertedGame.created_at) > new Date(Date.now() - 60000);
     if (isNewGame) newGames++; else updatedGames++;
 
-    // 2. UPSERT products (denom) — dedupe by (game_id, name, price_idr) first
-    // supplier_sku format: "entitasId:denomId" — needed for UniPlay inquiry-payment
-    const entitasId = item.id ?? item.entitas_id ?? item.entitasId;
-    const seenDenoms = new Set();
+    // 2. UPSERT products (denom)
+    // supplier_sku = stable NAME-based key: slugify(game_name)--slugify(denom_name)
+    // Reason: UniPlay API returns encoded tokens as item.id / denom.id that
+    // ROTATE per API call (not stable identifiers). Fulfill engine must call
+    // getDTU fresh to resolve current ids at order time.
+    const seenSkus = new Set();
     for (const denom of item.denom || []) {
-      if (!denom.id) continue; // skip if no supplier_sku (prevents null-dupe)
-      if (seenDenoms.has(denom.id)) continue; // skip dupes in same API response
-      seenDenoms.add(denom.id);
+      if (!denom.package) continue;
+      const compositeSku = `${slugify(item.name)}--${slugify(denom.package)}`;
+      if (seenSkus.has(compositeSku)) continue;
+      seenSkus.add(compositeSku);
 
       const cost = Number(denom.price);
       const sell = sellPrice(cost);
-      const compositeSku = entitasId ? `${entitasId}:${denom.id}` : String(denom.id);
 
       const productData = {
         game_id: upsertedGame.id,

@@ -6,9 +6,62 @@
 // ═══════════════════════════════════════════════════════════
 
 import { supabase } from "./supabase.js";
-import { inquiryPayment, confirmPayment, checkOrder } from "./uniplay.js";
+import { inquiryPayment, confirmPayment, checkOrder, getDTU, getVoucher, getPPOB } from "./uniplay.js";
 
 const PINCODE = process.env.UNIPLAY_PINCODE;
+
+// ─────────────────────────────────────────────
+// Short-lived catalog cache (30s) — reduces UniPlay calls
+// if multiple orders arrive back-to-back
+// ─────────────────────────────────────────────
+const CACHE_TTL_MS = 30_000;
+const catalogCache = { dtu: null, voucher: null, ppob: null, at: 0 };
+
+async function getUniplayCatalog() {
+  if (catalogCache.dtu && Date.now() - catalogCache.at < CACHE_TTL_MS) {
+    return catalogCache;
+  }
+  const [dtu, voucher, ppob] = await Promise.all([
+    getDTU().catch(() => []),
+    getVoucher().catch(() => []),
+    getPPOB().catch(() => []),
+  ]);
+  catalogCache.dtu = dtu;
+  catalogCache.voucher = voucher;
+  catalogCache.ppob = ppob;
+  catalogCache.at = Date.now();
+  return catalogCache;
+}
+
+// Simple slug helper — must MATCH sync.js slugify() output exactly
+function slugify(str) {
+  return String(str).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60);
+}
+
+// Resolve fresh (entitasId, denomId) from UniPlay API using stored stable SKU
+// stable sku format: slugify(game_name) + "--" + slugify(denom_name)
+async function resolveUniplayIds(order) {
+  if (!order.supplier_sku?.includes("--")) {
+    return { error: `supplier_sku missing "--" separator: ${order.supplier_sku}` };
+  }
+
+  const [gameSlug, denomSlug] = order.supplier_sku.split("--");
+  const { dtu, voucher, ppob } = await getUniplayCatalog();
+  const allItems = [...dtu, ...voucher, ...ppob];
+
+  const item = allItems.find((it) => slugify(it.name) === gameSlug);
+  if (!item) return { error: `Game not found in UniPlay catalog: ${gameSlug}` };
+
+  const denom = (item.denom || []).find((d) => slugify(d.package) === denomSlug);
+  if (!denom) return { error: `Denom not found: ${denomSlug} dalam ${item.name}` };
+
+  const entitasId = item.id ?? item.entitas_id ?? item.entitasId;
+  if (!entitasId || !denom.id) {
+    return { error: `Missing entitas_id or denom.id in UniPlay response` };
+  }
+
+  return { entitasId, denomId: denom.id, itemName: item.name, denomName: denom.package };
+}
 
 /**
  * Append a log entry to order.fulfill_log
@@ -96,21 +149,20 @@ async function fulfillUniPlay(order) {
     return { success: false, message: "UNIPLAY_PINCODE not set" };
   }
 
-  if (!order.entitas_id || !order.supplier_sku) {
-    await markFailed(
-      order.id,
-      `Missing UniPlay IDs — entitas_id=${order.entitas_id}, sku=${order.supplier_sku}`
-    );
-    return {
-      success: false,
-      message: "Missing UniPlay entitas_id/supplier_sku",
-    };
+  if (!order.supplier_sku) {
+    await markFailed(order.id, "supplier_sku missing in order");
+    return { success: false, message: "supplier_sku missing" };
   }
 
-  // Extract denom_id from supplier_sku (format: "entitasId:denomId")
-  const denomId = order.supplier_sku.includes(":")
-    ? order.supplier_sku.split(":")[1]
-    : order.supplier_sku;
+  // ─── Resolve FRESH entitasId + denomId from UniPlay API ───
+  // (UniPlay rotates these tokens per call, can't cache)
+  const resolved = await resolveUniplayIds(order);
+  if (resolved.error) {
+    await markFailed(order.id, `resolve IDs: ${resolved.error}`);
+    return { success: false, message: resolved.error };
+  }
+  const { entitasId, denomId } = resolved;
+  await appendLog(order.id, { action: "resolved_ids", entitasId, denomId });
 
   // Extract user_id / server_id dari custom_data
   const userId = String(order.custom_data?.user_id || order.custom_data?.userId || "");
@@ -127,7 +179,7 @@ async function fulfillUniPlay(order) {
   let inquiryId;
   try {
     const inquiry = await inquiryPayment({
-      entitasId: order.entitas_id,
+      entitasId,
       denomId,
       userId,
       serverId,
