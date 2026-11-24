@@ -71,6 +71,8 @@ async function syncCategory(categoryLabel, fetcher, category) {
     if (isNewGame) newGames++; else updatedGames++;
 
     // 2. UPSERT products (denom) — dedupe by (game_id, name, price_idr) first
+    // supplier_sku format: "entitasId:denomId" — needed for UniPlay inquiry-payment
+    const entitasId = item.id ?? item.entitas_id ?? item.entitasId;
     const seenDenoms = new Set();
     for (const denom of item.denom || []) {
       if (!denom.id) continue; // skip if no supplier_sku (prevents null-dupe)
@@ -79,6 +81,7 @@ async function syncCategory(categoryLabel, fetcher, category) {
 
       const cost = Number(denom.price);
       const sell = sellPrice(cost);
+      const compositeSku = entitasId ? `${entitasId}:${denom.id}` : String(denom.id);
 
       const productData = {
         game_id: upsertedGame.id,
@@ -88,7 +91,7 @@ async function syncCategory(categoryLabel, fetcher, category) {
         price_idr: sell,
         cost_idr: cost,
         supplier: "uniplay",
-        supplier_sku: String(denom.id),
+        supplier_sku: compositeSku,
         notes: `[uniplay/${category}] ${item.name}`,
         is_hot: false,
         is_available: true,
