@@ -42,7 +42,7 @@ async function send(text, extra = {}) {
   return await tg("sendMessage", {
     chat_id: CHAT_ID,
     text,
-    parse_mode: "Markdown",
+    parse_mode: "HTML",
     disable_web_page_preview: true,
     ...extra,
   });
@@ -53,10 +53,18 @@ async function editMessage(messageId, text, extra = {}) {
     chat_id: CHAT_ID,
     message_id: messageId,
     text,
-    parse_mode: "Markdown",
+    parse_mode: "HTML",
     disable_web_page_preview: true,
     ...extra,
   });
+}
+
+// HTML-escape user-supplied values so they can't break the message parse
+function esc(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 async function answerCallback(callbackId, text = "") {
@@ -72,7 +80,7 @@ function fmtIDR(n) {
 
 function fmtOrder(o) {
   const custom = Object.entries(o.custom_data || {})
-    .map(([k, v]) => `   • ${k}: \`${v}\``)
+    .map(([k, v]) => `   • ${esc(k)}: <code>${esc(v)}</code>`)
     .join("\n");
 
   const statusEmoji = {
@@ -86,19 +94,19 @@ function fmtOrder(o) {
     refunded: "↩️",
   }[o.status] || "❓";
 
-  const qtyLine = o.qty && o.qty > 1 ? ` _(×${o.qty})_` : "";
+  const qtyLine = o.qty && o.qty > 1 ? ` <i>(×${o.qty})</i>` : "";
   return (
-    `${statusEmoji} *${o.order_code}* · _${o.status}_\n` +
+    `${statusEmoji} <b>${esc(o.order_code)}</b> · <i>${esc(o.status)}</i>\n` +
     `━━━━━━━━━━━━━━━\n` +
-    `🎮 ${o.game_name}\n` +
-    `💎 ${o.product_name}${qtyLine}\n` +
+    `🎮 ${esc(o.game_name)}\n` +
+    `💎 ${esc(o.product_name)}${qtyLine}\n` +
     `💰 ${fmtIDR(o.total_idr)}` +
-    (o.voucher_code ? ` _(voucher ${o.voucher_code} -${fmtIDR(o.voucher_discount_idr)})_` : "") +
-    `\n📱 ${o.phone}\n` +
-    (custom ? `\n*Data Akun:*\n${custom}\n` : "") +
-    (o.notes ? `\n📝 _${o.notes}_\n` : "") +
-    `\n📦 supplier: \`${o.supplier}\`` +
-    (o.uniplay_order_id ? `\n🔗 uniplay: \`${o.uniplay_order_id}\`` : "")
+    (o.voucher_code ? ` <i>(voucher ${esc(o.voucher_code)} -${fmtIDR(o.voucher_discount_idr)})</i>` : "") +
+    `\n📱 ${esc(o.phone)}\n` +
+    (custom ? `\n<b>Data Akun:</b>\n${custom}\n` : "") +
+    (o.notes ? `\n📝 <i>${esc(o.notes)}</i>\n` : "") +
+    `\n📦 supplier: <code>${esc(o.supplier)}</code>` +
+    (o.uniplay_order_id ? `\n🔗 uniplay: <code>${esc(o.uniplay_order_id)}</code>` : "")
   );
 }
 
@@ -135,7 +143,7 @@ export async function notifyNewOrder(order) {
       ],
     ],
   };
-  const msg = `🔔 *ORDER BARU* (nunggu pembayaran)\n\n${fmtOrder(order)}`;
+  const msg = `🔔 <b>ORDER BARU</b> (nunggu pembayaran)\n\n${fmtOrder(order)}`;
   const result = await send(msg, { reply_markup: keyboard });
   if (result?.ok) orderMessageMap.set(order.id, result.result.message_id);
 }
@@ -143,8 +151,8 @@ export async function notifyNewOrder(order) {
 export async function notifyPaid(order) {
   const isManual = order.supplier === "manual" || order.supplier === "lapakgaming";
   const msg = isManual
-    ? `💰 *PAYMENT RECEIVED* — perlu fulfillment manual\n\n${fmtOrder(order)}`
-    : `💰 *PAYMENT RECEIVED* — auto-fulfilling…\n\n${fmtOrder(order)}`;
+    ? `💰 <b>PAYMENT RECEIVED</b> — perlu fulfillment manual\n\n${fmtOrder(order)}`
+    : `💰 <b>PAYMENT RECEIVED</b> — auto-fulfilling…\n\n${fmtOrder(order)}`;
 
   // Manual orders get action buttons so admin can override status
   const keyboard = isManual
@@ -172,7 +180,7 @@ export async function notifyPaid(order) {
 }
 
 export async function notifyFulfilled(order) {
-  const msg = `✅ *ORDER FULFILLED*\n\n${fmtOrder(order)}`;
+  const msg = `✅ <b>ORDER FULFILLED</b>\n\n${fmtOrder(order)}`;
 
   // Click-to-WA invoice button — Hera clicks, WA opens with pre-filled text to customer
   const waUrl = buildInvoiceWaUrl(order);
@@ -195,7 +203,7 @@ export async function notifyFailed(order, reason) {
       ],
     ],
   };
-  const msg = `❌ *ORDER FAILED*\n\n${fmtOrder(order)}\n\n⚠️ _${reason}_`;
+  const msg = `❌ <b>ORDER FAILED</b>\n\n${fmtOrder(order)}\n\n⚠️ <i>${esc(reason)}</i>`;
   const mid = orderMessageMap.get(order.id);
   if (mid) await editMessage(mid, msg, { reply_markup: keyboard });
   else await send(msg, { reply_markup: keyboard });
@@ -260,7 +268,7 @@ async function handleCallback(cb) {
     if (order) {
       await answerCallback(cb.id, "Cancelled");
       const mid = orderMessageMap.get(orderId);
-      if (mid) await editMessage(mid, `🚫 *CANCELLED*\n\n${fmtOrder(order)}`, {});
+      if (mid) await editMessage(mid, `🚫 <b>CANCELLED</b>\n\n${fmtOrder(order)}`, {});
     }
     return;
   }
@@ -297,7 +305,7 @@ async function handleCallback(cb) {
           { text: "❌ Mark FAILED", callback_data: `mark_failed:${orderId}` },
         ]],
       };
-      if (mid) await editMessage(mid, `⚙️ *PROCESSING*\n\n${fmtOrder(order)}`, { reply_markup: keyboard });
+      if (mid) await editMessage(mid, `⚙️ <b>PROCESSING</b>\n\n${fmtOrder(order)}`, { reply_markup: keyboard });
     } else {
       await answerCallback(cb.id, "Can't set processing (bukan paid)");
     }
@@ -352,12 +360,12 @@ async function handleCommand(msg) {
 
   if (text === "/start" || text === "/help") {
     await send(
-      `🤖 *Skyra Bot ready!*\n\n` +
+      `🤖 <b>Skyra Bot ready!</b>\n\n` +
         `Commands:\n` +
         `/saldo — cek saldo UniPlay\n` +
         `/orders — list 5 order terakhir\n` +
         `/pending — list order status=paid/pending\n` +
-        `/status \`<code>\` — detail order by code`
+        `/status &lt;code&gt; — detail order by code`
     );
     return;
   }
@@ -365,9 +373,9 @@ async function handleCommand(msg) {
   if (text === "/saldo") {
     try {
       const saldo = await getSaldo();
-      await send(`💰 *UniPlay Saldo:* ${fmtIDR(saldo)}`);
+      await send(`💰 <b>UniPlay Saldo:</b> ${fmtIDR(saldo)}`);
     } catch (e) {
-      await send(`❌ Error cek saldo: \`${e.message}\``);
+      await send(`❌ Error cek saldo: <code>${esc(e.message)}</code>`);
     }
     return;
   }
@@ -379,7 +387,7 @@ async function handleCommand(msg) {
       .order("created_at", { ascending: false })
       .limit(5);
     if (!data?.length) {
-      await send("_Belum ada order._");
+      await send("<i>Belum ada order.</i>");
       return;
     }
     for (const o of data) {
@@ -396,7 +404,7 @@ async function handleCommand(msg) {
       .order("created_at", { ascending: false })
       .limit(10);
     if (!data?.length) {
-      await send("_Semua order sudah done 🎉_");
+      await send("<i>Semua order sudah done 🎉</i>");
       return;
     }
     for (const o of data) {
@@ -417,7 +425,7 @@ async function handleCommand(msg) {
   if (text.startsWith("/status ")) {
     const code = text.slice(8).trim();
     const { data } = await supabase.from("orders").select("*").eq("order_code", code).single();
-    if (!data) return await send(`❌ Order \`${code}\` not found`);
+    if (!data) return await send(`❌ Order <code>${esc(code)}</code> not found`);
     await send(fmtOrder(data));
     return;
   }
@@ -468,7 +476,7 @@ export async function startBot() {
     return;
   }
   console.log("🤖 Telegram bot started (long polling)");
-  await send("🚀 *Skyra Worker Online* — ready to process orders");
+  await send("🚀 <b>Skyra Worker Online</b> — ready to process orders");
 
   // Infinite long-poll loop
   (async function loop() {
