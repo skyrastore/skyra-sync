@@ -14,6 +14,10 @@ const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || 5000);
 // Prevent double-processing within the same tick
 const inflight = new Set();
 
+// Manual orders stay in 'paid' status until admin acts via Telegram button.
+// Remember which have already been notified so we don't re-notify every tick.
+const manualNotified = new Set();
+
 // Track last notification cutoff so we don't re-announce old orders on restart
 let lastSeenCreatedAt = new Date().toISOString();
 
@@ -45,7 +49,7 @@ async function pollNewPendingOrders() {
 async function pollPaidOrders() {
   const { data, error } = await supabase
     .from("orders")
-    .select("id, order_code")
+    .select("id, order_code, supplier")
     .eq("status", "paid")
     .order("paid_at", { ascending: true })
     .limit(5);
@@ -58,18 +62,27 @@ async function pollPaidOrders() {
 
   for (const o of data) {
     if (inflight.has(o.id)) continue;
+
+    const isManual = o.supplier === "manual" || o.supplier === "lapakgaming";
+    // Manual order already notified → skip. Admin's Telegram action will
+    // transition status away from 'paid'.
+    if (isManual && manualNotified.has(o.id)) continue;
+
     inflight.add(o.id);
 
-    // Fire-and-forget (don't block poll loop)
     (async () => {
       try {
-        // Notify "payment received, fulfilling…"
         const { data: fullOrder } = await supabase.from("orders").select("*").eq("id", o.id).single();
         if (fullOrder) await notifyPaid(fullOrder);
 
+        if (isManual) {
+          manualNotified.add(o.id);
+          console.log(`Order ${o.order_code} queued for manual (admin via Telegram)`);
+          return;
+        }
+
         const result = await fulfillOrder(o.id);
 
-        // Re-fetch after fulfill (status transitioned to done/failed)
         const { data: finalOrder } = await supabase.from("orders").select("*").eq("id", o.id).single();
         if (!finalOrder) return;
 
@@ -77,9 +90,6 @@ async function pollPaidOrders() {
           await notifyFulfilled(finalOrder);
         } else if (finalOrder.status === "failed") {
           await notifyFailed(finalOrder, result.message);
-        } else if (finalOrder.status === "fulfilling" && result.success) {
-          // Manual supplier — admin needs to act
-          console.log(`Order ${o.order_code} queued for manual fulfillment`);
         }
       } catch (e) {
         console.error(`Fulfill ${o.order_code} error:`, e);

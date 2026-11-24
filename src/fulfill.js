@@ -100,7 +100,21 @@ export async function fulfillOrder(orderId) {
     };
   }
 
-  // ─── Transition: paid → fulfilling (lock) ───
+  // Manual supplier: DON'T auto-transition to fulfilling. Keep status='paid'
+  // so Telegram notifyPaid shows DONE/PROCESSING buttons for admin to action.
+  if (order.supplier === "manual" || order.supplier === "lapakgaming") {
+    await appendLog(orderId, {
+      action: "manual_queue",
+      note: "Manual supplier — waiting for admin Telegram action",
+    });
+    return {
+      success: true,
+      manual: true,
+      message: `Manual (${order.supplier}) — admin action needed`,
+    };
+  }
+
+  // Auto suppliers (uniplay): lock paid → fulfilling before calling API
   const { error: lockErr } = await supabase
     .from("orders")
     .update({
@@ -109,7 +123,7 @@ export async function fulfillOrder(orderId) {
       fulfill_attempts: (order.fulfill_attempts || 0) + 1,
     })
     .eq("id", orderId)
-    .eq("status", "paid"); // optimistic lock: fails kalau udah bukan paid
+    .eq("status", "paid");
 
   if (lockErr) {
     return { success: false, message: `Lock failed: ${lockErr.message}` };
@@ -117,22 +131,8 @@ export async function fulfillOrder(orderId) {
 
   await appendLog(orderId, { action: "fulfilling_start", supplier: order.supplier });
 
-  // ─── Route by supplier ───
   if (order.supplier === "uniplay") {
     return await fulfillUniPlay(order);
-  }
-
-  if (order.supplier === "manual" || order.supplier === "lapakgaming") {
-    // Manual supplier: biarkan admin fulfill via Telegram button atau dashboard
-    // Status tetep 'fulfilling' — admin akan update ke 'done' manually
-    await appendLog(orderId, {
-      action: "manual_queue",
-      note: "Manual supplier — nunggu admin fulfill",
-    });
-    return {
-      success: true,
-      message: `Manual supplier (${order.supplier}) — nunggu admin`,
-    };
   }
 
   // Unknown supplier

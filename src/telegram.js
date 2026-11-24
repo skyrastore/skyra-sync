@@ -86,11 +86,12 @@ function fmtOrder(o) {
     refunded: "↩️",
   }[o.status] || "❓";
 
+  const qtyLine = o.qty && o.qty > 1 ? ` _(×${o.qty})_` : "";
   return (
     `${statusEmoji} *${o.order_code}* · _${o.status}_\n` +
     `━━━━━━━━━━━━━━━\n` +
     `🎮 ${o.game_name}\n` +
-    `💎 ${o.product_name}\n` +
+    `💎 ${o.product_name}${qtyLine}\n` +
     `💰 ${fmtIDR(o.total_idr)}` +
     (o.voucher_code ? ` _(voucher ${o.voucher_code} -${fmtIDR(o.voucher_discount_idr)})_` : "") +
     `\n📱 ${o.phone}\n` +
@@ -99,6 +100,27 @@ function fmtOrder(o) {
     `\n📦 supplier: \`${o.supplier}\`` +
     (o.uniplay_order_id ? `\n🔗 uniplay: \`${o.uniplay_order_id}\`` : "")
   );
+}
+
+// ─────────────────────────────────────────────
+// Build WhatsApp "send invoice" URL for click-to-WA pattern
+// Hera clicks the button → WA opens on her device with pre-filled
+// text to the customer's phone. No WA gateway needed.
+// ─────────────────────────────────────────────
+function buildInvoiceWaUrl(order) {
+  const phoneDigits = String(order.phone || "").replace(/\D/g, "");
+  if (!phoneDigits) return null;
+  const qtyLine = order.qty && order.qty > 1 ? `🔢 Qty: ${order.qty}×\n` : "";
+  const msg =
+    `Halo kak! Pesanan kamu di Skyra Store selesai ✨\n\n` +
+    `📝 Kode Order: ${order.order_code}\n` +
+    `🎮 ${order.game_name}\n` +
+    `💎 ${order.product_name}\n` +
+    qtyLine +
+    `💰 Total: ${fmtIDR(order.total_idr)}\n\n` +
+    `Cek detail lengkap: ${SITE_URL}/order/${order.order_code}\n\n` +
+    `Makasih udah top up di Skyra! 🙏`;
+  return `https://wa.me/${phoneDigits}?text=${encodeURIComponent(msg)}`;
 }
 
 // ─────────────────────────────────────────────
@@ -119,20 +141,49 @@ export async function notifyNewOrder(order) {
 }
 
 export async function notifyPaid(order) {
-  const msg = `💰 *PAYMENT RECEIVED* — auto-fulfilling…\n\n${fmtOrder(order)}`;
+  const isManual = order.supplier === "manual" || order.supplier === "lapakgaming";
+  const msg = isManual
+    ? `💰 *PAYMENT RECEIVED* — perlu fulfillment manual\n\n${fmtOrder(order)}`
+    : `💰 *PAYMENT RECEIVED* — auto-fulfilling…\n\n${fmtOrder(order)}`;
+
+  // Manual orders get action buttons so admin can override status
+  const keyboard = isManual
+    ? {
+        inline_keyboard: [
+          [
+            { text: "▶ Set Processing", callback_data: `set_processing:${order.id}` },
+            { text: "✅ Mark DONE", callback_data: `mark_done:${order.id}` },
+          ],
+          [
+            { text: "❌ Mark FAILED", callback_data: `mark_failed:${order.id}` },
+          ],
+        ],
+      }
+    : undefined;
+
   const mid = orderMessageMap.get(order.id);
+  const opts = keyboard ? { reply_markup: keyboard } : {};
   if (mid) {
-    await editMessage(mid, msg, {}); // strip inline buttons
+    await editMessage(mid, msg, opts);
   } else {
-    await send(msg);
+    const result = await send(msg, opts);
+    if (result?.ok) orderMessageMap.set(order.id, result.result.message_id);
   }
 }
 
 export async function notifyFulfilled(order) {
   const msg = `✅ *ORDER FULFILLED*\n\n${fmtOrder(order)}`;
+
+  // Click-to-WA invoice button — Hera clicks, WA opens with pre-filled text to customer
+  const waUrl = buildInvoiceWaUrl(order);
+  const keyboard = waUrl
+    ? { inline_keyboard: [[{ text: "📤 Kirim Invoice ke Customer", url: waUrl }]] }
+    : undefined;
+  const opts = keyboard ? { reply_markup: keyboard } : {};
+
   const mid = orderMessageMap.get(order.id);
-  if (mid) await editMessage(mid, msg, {});
-  else await send(msg);
+  if (mid) await editMessage(mid, msg, opts);
+  else await send(msg, opts);
 }
 
 export async function notifyFailed(order, reason) {
@@ -210,6 +261,61 @@ async function handleCallback(cb) {
     if (order) {
       await answerCallback(cb.id, "Queued for retry");
       await notifyPaid(order);
+    }
+    return;
+  }
+
+  if (action === "set_processing") {
+    const { data: order } = await supabase
+      .from("orders")
+      .update({ status: "fulfilling", fulfilling_at: new Date().toISOString() })
+      .eq("id", orderId)
+      .in("status", ["paid"])
+      .select()
+      .single();
+    if (order) {
+      await answerCallback(cb.id, "Marked as processing");
+      const mid = orderMessageMap.get(orderId);
+      const keyboard = {
+        inline_keyboard: [[
+          { text: "✅ Mark DONE", callback_data: `mark_done:${orderId}` },
+          { text: "❌ Mark FAILED", callback_data: `mark_failed:${orderId}` },
+        ]],
+      };
+      if (mid) await editMessage(mid, `⚙️ *PROCESSING*\n\n${fmtOrder(order)}`, { reply_markup: keyboard });
+    } else {
+      await answerCallback(cb.id, "Can't set processing (bukan paid)");
+    }
+    return;
+  }
+
+  if (action === "mark_done") {
+    const { data: order } = await supabase
+      .from("orders")
+      .update({ status: "done", fulfilled_at: new Date().toISOString() })
+      .eq("id", orderId)
+      .in("status", ["paid", "fulfilling"])
+      .select()
+      .single();
+    if (order) {
+      await answerCallback(cb.id, "Marked DONE ✅");
+      await notifyFulfilled(order);
+    } else {
+      await answerCallback(cb.id, "Can't mark done (status ga match)");
+    }
+    return;
+  }
+
+  if (action === "mark_failed") {
+    const { data: order } = await supabase
+      .from("orders")
+      .update({ status: "failed" })
+      .eq("id", orderId)
+      .select()
+      .single();
+    if (order) {
+      await answerCallback(cb.id, "Marked FAILED ❌");
+      await notifyFailed(order, "Manual admin override");
     }
     return;
   }
