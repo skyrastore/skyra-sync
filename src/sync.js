@@ -50,7 +50,9 @@ async function syncCategory(categoryLabel, fetcher, category) {
         { key: "user_id", label: "User ID", type: "text", required: true },
         { key: "server_id", label: "Server ID (opsional)", type: "text", required: false },
       ],
-      instructions: item.publisher_website ? `Website: ${item.publisher_website}` : null,
+      // Don't populate instructions from publisher website — it's noise on game page.
+      // Leave null, use frontend's static badge instead.
+      instructions: null,
       is_active: true,
       is_featured: false,
       sort_order: 0,
