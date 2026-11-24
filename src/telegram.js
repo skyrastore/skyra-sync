@@ -217,19 +217,34 @@ async function handleCallback(cb) {
   if (cb.message?.message_id) orderMessageMap.set(orderId, cb.message.message_id);
 
   if (action === "confirm_paid") {
+    // Check current state first so we can give a better error
+    const { data: existing } = await supabase
+      .from("orders")
+      .select("status")
+      .eq("id", orderId)
+      .single();
+    if (!existing) {
+      await answerCallback(cb.id, "Order not found");
+      return;
+    }
+    if (["paid", "fulfilling", "done"].includes(existing.status)) {
+      await answerCallback(cb.id, `Already ${existing.status}`);
+      return;
+    }
+    // Allow confirm from any non-terminal payment state (pending/expired)
     const { data: order } = await supabase
       .from("orders")
       .update({ status: "paid", paid_at: new Date().toISOString(), payment_method: "manual" })
       .eq("id", orderId)
-      .eq("status", "pending_payment")
+      .in("status", ["pending_payment", "expired"])
       .select()
       .single();
 
     if (order) {
-      await answerCallback(cb.id, "Marked paid — fulfilling…");
+      await answerCallback(cb.id, "Marked paid ✅");
       await notifyPaid(order);
     } else {
-      await answerCallback(cb.id, "Can't confirm (bukan pending_payment)");
+      await answerCallback(cb.id, `Can't confirm (current: ${existing.status})`);
     }
     return;
   }
