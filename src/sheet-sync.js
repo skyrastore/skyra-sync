@@ -62,7 +62,7 @@ export async function pullPricelist() {
           cost_idr: item.cost_idr,
           supplier: "manual",
           supplier_sku: item.supplier_sku,
-          is_available: true,
+          is_available: item.available !== false, // KATALOG WEB passes `available: false` for HABIS rows; legacy PRODUK rows don't set this so default to true
         },
         { onConflict: "supplier,supplier_sku", ignoreDuplicates: false }
       );
