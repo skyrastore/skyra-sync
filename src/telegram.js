@@ -10,7 +10,7 @@
 import { supabase } from "./supabase.js";
 import { recheckUniPlayOrder } from "./fulfill.js";
 import { getSaldo } from "./uniplay.js";
-import { pushOrderToSheet } from "./sheet-sync.js";
+import { pushOrderToSheet, pullPricelist } from "./sheet-sync.js";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -367,7 +367,8 @@ async function handleCommand(msg) {
         `/saldo — cek saldo UniPlay\n` +
         `/orders — list 5 order terakhir\n` +
         `/pending — list order status=paid/pending\n` +
-        `/status &lt;code&gt; — detail order by code`
+        `/status &lt;code&gt; — detail order by code\n` +
+        `/pullsheet — force sync pricelist dari Google Sheet`
     );
     return;
   }
@@ -420,6 +421,23 @@ async function handleCommand(msg) {
         : undefined;
       const res = await send(fmtOrder(o), keyboard ? { reply_markup: keyboard } : {});
       if (res?.ok) orderMessageMap.set(o.id, res.result.message_id);
+    }
+    return;
+  }
+
+  if (text === "/pullsheet" || text === "/pull-sheet") {
+    await send("⏳ Pulling pricelist dari Sheet…");
+    const result = await pullPricelist();
+    if (result.success) {
+      await send(
+        `✅ <b>Sheet sync done</b>\n` +
+        `━━━━━━━━━━━━━━━\n` +
+        `📥 Upserted: <b>${result.upserted}</b>\n` +
+        `⚠️ Skipped: ${result.skipped}\n` +
+        `🚫 Deactivated: ${result.deactivated}`
+      );
+    } else {
+      await send(`❌ Pull failed: <code>${esc(result.message)}</code>`);
     }
     return;
   }
