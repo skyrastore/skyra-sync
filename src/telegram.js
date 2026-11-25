@@ -10,6 +10,7 @@
 import { supabase } from "./supabase.js";
 import { recheckUniPlayOrder } from "./fulfill.js";
 import { getSaldo } from "./uniplay.js";
+import { pushOrderToSheet } from "./sheet-sync.js";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -323,6 +324,7 @@ async function handleCallback(cb) {
     if (order) {
       await answerCallback(cb.id, "Marked DONE ✅");
       await notifyFulfilled(order);
+      await pushOrderToSheet(order); // manual done → append to HARIAN
     } else {
       await answerCallback(cb.id, "Can't mark done (status ga match)");
     }

@@ -8,6 +8,7 @@
 import { supabase } from "./supabase.js";
 import { fulfillOrder } from "./fulfill.js";
 import { notifyNewOrder, notifyPaid, notifyFulfilled, notifyFailed } from "./telegram.js";
+import { pushOrderToSheet } from "./sheet-sync.js";
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || 5000);
 
@@ -88,6 +89,7 @@ async function pollPaidOrders() {
 
         if (result.success && finalOrder.status === "done") {
           await notifyFulfilled(finalOrder);
+          await pushOrderToSheet(finalOrder); // auto-fulfilled done → sheet
         } else if (finalOrder.status === "failed") {
           await notifyFailed(finalOrder, result.message);
         }

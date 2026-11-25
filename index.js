@@ -10,6 +10,7 @@ import cron from "node-cron";
 import { runSync } from "./src/sync.js";
 import { startPoller } from "./src/poller.js";
 import { startBot } from "./src/telegram.js";
+import { startSheetPoller } from "./src/sheet-sync.js";
 
 const CRON_SCHEDULE = process.env.CRON_SCHEDULE || "*/15 * * * *";
 
@@ -51,6 +52,9 @@ startPoller();
 
 // 3. Telegram bot — long-poll commands + inline callbacks
 await startBot();
+
+// 4. Sheet pricelist poller — pull from Google Sheet every 5 min
+startSheetPoller();
 
 console.log("\n✅ Worker running. Press Ctrl+C to stop.");
 
