@@ -96,6 +96,11 @@ function fmtOrder(o) {
   }[o.status] || "❓";
 
   const qtyLine = o.qty && o.qty > 1 ? ` <i>(×${o.qty})</i>` : "";
+  const contactLines = [
+    o.phone ? `📱 ${esc(o.phone)}` : null,
+    o.email ? `📧 ${esc(o.email)}` : null,
+  ].filter(Boolean).join("\n");
+
   return (
     `${statusEmoji} <b>${esc(o.order_code)}</b> · <i>${esc(o.status)}</i>\n` +
     `━━━━━━━━━━━━━━━\n` +
@@ -103,7 +108,7 @@ function fmtOrder(o) {
     `💎 ${esc(o.product_name)}${qtyLine}\n` +
     `💰 ${fmtIDR(o.total_idr)}` +
     (o.voucher_code ? ` <i>(voucher ${esc(o.voucher_code)} -${fmtIDR(o.voucher_discount_idr)})</i>` : "") +
-    `\n📱 ${esc(o.phone)}\n` +
+    `\n${contactLines || "(no contact)"}\n` +
     (custom ? `\n<b>Data Akun:</b>\n${custom}\n` : "") +
     (o.notes ? `\n📝 <i>${esc(o.notes)}</i>\n` : "") +
     `\n📦 supplier: <code>${esc(o.supplier)}</code>` +
@@ -118,7 +123,7 @@ function fmtOrder(o) {
 // ─────────────────────────────────────────────
 function buildInvoiceWaUrl(order) {
   const phoneDigits = String(order.phone || "").replace(/\D/g, "");
-  if (!phoneDigits) return null;
+  if (!phoneDigits) return null; // customer pakai email → tombol WA ga ditampilkan
   const qtyLine = order.qty && order.qty > 1 ? `🔢 Qty: ${order.qty}×\n` : "";
   const msg =
     `Halo kak! Pesanan kamu di Skyra Store selesai ✨\n\n` +
@@ -130,6 +135,22 @@ function buildInvoiceWaUrl(order) {
     `Cek detail lengkap: ${SITE_URL}/order/${order.order_code}\n\n` +
     `Makasih udah top up di Skyra! 🙏`;
   return `https://wa.me/${phoneDigits}?text=${encodeURIComponent(msg)}`;
+}
+
+function buildInvoiceMailtoUrl(order) {
+  if (!order.email) return null;
+  const qtyLine = order.qty && order.qty > 1 ? `Qty: ${order.qty}×\n` : "";
+  const subject = `[Skyra Store] Pesanan ${order.order_code} Selesai`;
+  const body =
+    `Halo kak!\n\nPesanan kamu di Skyra Store selesai ✨\n\n` +
+    `Kode Order: ${order.order_code}\n` +
+    `Game: ${order.game_name}\n` +
+    `Paket: ${order.product_name}\n` +
+    qtyLine +
+    `Total: ${fmtIDR(order.total_idr)}\n\n` +
+    `Cek detail: ${SITE_URL}/order/${order.order_code}\n\n` +
+    `Makasih udah top up di Skyra! 🙏`;
+  return `mailto:${order.email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
 }
 
 // ─────────────────────────────────────────────
@@ -183,11 +204,13 @@ export async function notifyPaid(order) {
 export async function notifyFulfilled(order) {
   const msg = `✅ <b>ORDER FULFILLED</b>\n\n${fmtOrder(order)}`;
 
-  // Click-to-WA invoice button — Hera clicks, WA opens with pre-filled text to customer
+  // Click-to-WA / Email invoice button — Hera clicks, WA/Mail opens with pre-filled text to customer
   const waUrl = buildInvoiceWaUrl(order);
-  const keyboard = waUrl
-    ? { inline_keyboard: [[{ text: "📤 Kirim Invoice ke Customer", url: waUrl }]] }
-    : undefined;
+  const mailUrl = buildInvoiceMailtoUrl(order);
+  const buttons = [];
+  if (waUrl) buttons.push({ text: "📤 Kirim Invoice (WA)", url: waUrl });
+  if (mailUrl) buttons.push({ text: "📧 Kirim Invoice (Email)", url: mailUrl });
+  const keyboard = buttons.length ? { inline_keyboard: [buttons] } : undefined;
   const opts = keyboard ? { reply_markup: keyboard } : {};
 
   const mid = orderMessageMap.get(order.id);
