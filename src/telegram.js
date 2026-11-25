@@ -385,14 +385,191 @@ async function handleCommand(msg) {
 
   if (text === "/start" || text === "/help") {
     await send(
-      `🤖 <b>Skyra Bot ready!</b>\n\n` +
-        `Commands:\n` +
-        `/saldo — cek saldo UniPlay\n` +
-        `/orders — list 5 order terakhir\n` +
-        `/pending — list order status=paid/pending\n` +
-        `/status &lt;code&gt; — detail order by code\n` +
-        `/pullsheet — force sync pricelist dari Google Sheet`
+      `🤖 <b>Skyra Bot</b>\n\n` +
+        `<b>📊 Orders & Stats</b>\n` +
+        `/stats — overview hari ini\n` +
+        `/orders — 5 order terakhir\n` +
+        `/pending — order yg butuh action\n` +
+        `/status &lt;code&gt; — detail order\n` +
+        `/revenue [day|week|month] — omzet\n\n` +
+        `<b>💰 Supplier & Sync</b>\n` +
+        `/saldo — saldo UniPlay\n` +
+        `/pullsheet — sync pricelist dari Sheet\n\n` +
+        `<b>👤 User</b>\n` +
+        `/user &lt;email&gt; — lookup user\n` +
+        `/saldo_add &lt;email&gt; &lt;amount&gt; [note]\n` +
+        `/saldo_sub &lt;email&gt; &lt;amount&gt; [note]\n\n` +
+        `<b>🎫 Voucher</b>\n` +
+        `/voucher_list — voucher aktif\n` +
+        `/voucher_new &lt;code&gt; &lt;min&gt; &lt;%&gt; &lt;days&gt;\n` +
+        `/voucher_off &lt;code&gt;\n\n` +
+        `<b>📦 Katalog</b>\n` +
+        `/stock_off &lt;sku&gt;  /stock_on &lt;sku&gt;\n` +
+        `/game_off &lt;slug&gt; /game_on &lt;slug&gt;`
     );
+    return;
+  }
+
+  // ─── /stats ───
+  if (text === "/stats") {
+    const todayISO = new Date().toISOString().slice(0, 10);
+    const { data: today } = await supabase.from("orders")
+      .select("status, total_idr").gte("created_at", todayISO);
+    const paid = (today || []).filter((o) => ["paid", "fulfilling", "done"].includes(o.status));
+    const rev = paid.reduce((s, o) => s + Number(o.total_idr || 0), 0);
+    const { count: totalUsers } = await supabase.from("wallets").select("*", { count: "exact", head: true });
+    const { data: wSum } = await supabase.from("wallets").select("balance_idr");
+    const walletTotal = (wSum || []).reduce((s, w) => s + Number(w.balance_idr || 0), 0);
+    await send(
+      `📊 <b>Stats Skyra — ${todayISO}</b>\n` +
+      `━━━━━━━━━━━━━━━\n` +
+      `📥 Orders today: <b>${today?.length || 0}</b> (paid: ${paid.length})\n` +
+      `💵 Revenue today: <b>${fmtIDR(rev)}</b>\n` +
+      `👤 Users: <b>${totalUsers || 0}</b>\n` +
+      `👛 Total wallet balance: <b>${fmtIDR(walletTotal)}</b>`
+    );
+    return;
+  }
+
+  // ─── /revenue [day|week|month] ───
+  if (text.startsWith("/revenue")) {
+    const period = text.split(/\s+/)[1] || "day";
+    const now = new Date();
+    const since = period === "month" ? new Date(now.getFullYear(), now.getMonth(), 1)
+                : period === "week"  ? new Date(now.getTime() - 7 * 86400000)
+                : new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const { data } = await supabase.from("orders")
+      .select("total_idr, voucher_discount_idr, status")
+      .gte("created_at", since.toISOString())
+      .in("status", ["paid", "fulfilling", "done"]);
+    const rev = (data || []).reduce((s, o) => s + Number(o.total_idr || 0), 0);
+    const discount = (data || []).reduce((s, o) => s + Number(o.voucher_discount_idr || 0), 0);
+    await send(
+      `💵 <b>Revenue (${period})</b>\n` +
+      `━━━━━━━━━━━━━━━\n` +
+      `Gross: <b>${fmtIDR(rev)}</b> · ${data?.length || 0} orders\n` +
+      `Voucher given out: ${fmtIDR(discount)}\n` +
+      `Period: sejak ${since.toLocaleDateString("id-ID")}`
+    );
+    return;
+  }
+
+  // ─── /user <email> ───
+  if (text.startsWith("/user ")) {
+    const email = text.slice(6).trim().toLowerCase();
+    const { data: userResp } = await supabase.auth.admin.listUsers();
+    const u = userResp?.users?.find((x) => x.email?.toLowerCase() === email);
+    if (!u) return await send(`❌ User <code>${esc(email)}</code> tidak ditemukan`);
+    const [wallet, orders, claims] = await Promise.all([
+      supabase.from("wallets").select("balance_idr").eq("user_id", u.id).maybeSingle(),
+      supabase.from("orders").select("order_code, total_idr, status").eq("user_id", u.id).order("created_at", { ascending: false }).limit(5),
+      supabase.from("vouchers_claimed").select("voucher_code, used_at").eq("user_id", u.id),
+    ]);
+    const claimTotal = claims.data?.length || 0;
+    const claimUsed = (claims.data || []).filter((c) => c.used_at).length;
+    const orderLines = (orders.data || []).slice(0, 5)
+      .map((o) => `  • <code>${o.order_code}</code> ${o.status} ${fmtIDR(o.total_idr)}`).join("\n") || "  <i>(belum ada order)</i>";
+    await send(
+      `👤 <b>${esc(email)}</b>\n` +
+      `━━━━━━━━━━━━━━━\n` +
+      `💰 Balance: <b>${fmtIDR(wallet.data?.balance_idr || 0)}</b>\n` +
+      `🎫 Voucher: ${claimUsed}/${claimTotal} used\n` +
+      `📦 Recent orders:\n${orderLines}`
+    );
+    return;
+  }
+
+  // ─── /saldo_add <email> <amount> [note] ───
+  if (text.startsWith("/saldo_add ") || text.startsWith("/saldo_sub ")) {
+    const isAdd = text.startsWith("/saldo_add ");
+    const parts = text.split(/\s+/);
+    const email = (parts[1] || "").toLowerCase();
+    const amount = Math.abs(parseInt(parts[2] || "0", 10));
+    const note = parts.slice(3).join(" ") || (isAdd ? "Topup manual admin" : "Pengurangan manual admin");
+    if (!email || !amount) return await send(`❌ Usage: <code>${isAdd ? "/saldo_add" : "/saldo_sub"} email amount [note]</code>`);
+
+    const { data: userResp } = await supabase.auth.admin.listUsers();
+    const u = userResp?.users?.find((x) => x.email?.toLowerCase() === email);
+    if (!u) return await send(`❌ User <code>${esc(email)}</code> tidak ditemukan`);
+
+    const { data, error } = await supabase.rpc("apply_wallet_tx", {
+      p_user_id: u.id,
+      p_tx_type: isAdd ? "admin_add" : "admin_sub",
+      p_amount_idr: isAdd ? amount : -amount,
+      p_description: note,
+      p_related_order_id: null,
+      p_midtrans_order_id: null,
+    });
+    if (error) return await send(`❌ RPC failed: <code>${esc(error.message)}</code>`);
+    const balance = data?.balance ?? "?";
+    await send(`${isAdd ? "✅" : "➖"} <b>${isAdd ? "+" : "-"}${fmtIDR(amount)}</b> ${esc(email)}\nSaldo baru: ${fmtIDR(balance)}\n📝 ${esc(note)}`);
+    return;
+  }
+
+  // ─── /voucher_list ───
+  if (text === "/voucher_list") {
+    const { data } = await supabase.from("vouchers")
+      .select("code, title, discount_type, discount_value, max_discount_idr, min_purchase_idr, used_count, max_uses, expires_at, is_active")
+      .order("is_active", { ascending: false }).order("code");
+    if (!data?.length) return await send("<i>Belum ada voucher.</i>");
+    const lines = data.map((v) => {
+      const d = v.discount_type === "percentage" ? `${v.discount_value}%` : fmtIDR(v.discount_value);
+      const cap = v.max_uses ? `${v.used_count || 0}/${v.max_uses}` : `${v.used_count || 0}/∞`;
+      const exp = v.expires_at ? new Date(v.expires_at).toLocaleDateString("id-ID") : "∞";
+      const status = v.is_active ? "🟢" : "⚫";
+      return `${status} <code>${v.code}</code> — ${d} min ${fmtIDR(v.min_purchase_idr)} · ${cap} · exp ${exp}`;
+    }).join("\n");
+    await send(`🎫 <b>Vouchers</b>\n━━━━━━━━━━━━━━━\n${lines}`);
+    return;
+  }
+
+  // ─── /voucher_new <code> <min> <percent> <days> ───
+  if (text.startsWith("/voucher_new ")) {
+    const parts = text.split(/\s+/);
+    const code = (parts[1] || "").toUpperCase();
+    const min = parseInt(parts[2] || "0", 10);
+    const pct = parseInt(parts[3] || "0", 10);
+    const days = parseInt(parts[4] || "30", 10);
+    if (!code || !min || !pct) return await send(`❌ Usage: <code>/voucher_new CODE min_idr percent days</code>\nContoh: <code>/voucher_new WELCOME10 100000 10 30</code>`);
+    const expires = new Date(Date.now() + days * 86400000).toISOString();
+    const { error } = await supabase.from("vouchers").insert({
+      code, title: `Diskon ${pct}% Min ${fmtIDR(min)}`,
+      description: `Diskon ${pct}% untuk belanja min ${fmtIDR(min)}, berlaku ${days} hari.`,
+      discount_type: "percentage", discount_value: pct,
+      min_purchase_idr: min, max_discount_idr: null, max_uses: null,
+      per_user_limit: 1, is_public: true, is_active: true, expires_at: expires,
+    });
+    if (error) return await send(`❌ Insert failed: <code>${esc(error.message)}</code>`);
+    await send(`✅ Voucher <code>${code}</code> created · ${pct}% off · min ${fmtIDR(min)} · exp ${days} hari`);
+    return;
+  }
+
+  // ─── /voucher_off <code> ───
+  if (text.startsWith("/voucher_off ")) {
+    const code = text.slice(13).trim().toUpperCase();
+    const { error } = await supabase.from("vouchers").update({ is_active: false }).eq("code", code);
+    if (error) return await send(`❌ ${esc(error.message)}`);
+    await send(`🔒 Voucher <code>${code}</code> dinonaktifkan`);
+    return;
+  }
+
+  // ─── /stock_on | /stock_off <sku> ───
+  if (text.startsWith("/stock_on ") || text.startsWith("/stock_off ")) {
+    const on = text.startsWith("/stock_on ");
+    const sku = text.slice(on ? 10 : 11).trim();
+    const { error, data } = await supabase.from("products").update({ is_available: on }).eq("supplier_sku", sku).select("name");
+    if (error || !data?.length) return await send(`❌ SKU <code>${esc(sku)}</code> tidak ditemukan`);
+    await send(`${on ? "🟢" : "🔴"} <b>${esc(data[0].name)}</b> ${on ? "aktif" : "nonaktif"}`);
+    return;
+  }
+
+  // ─── /game_on | /game_off <slug> ───
+  if (text.startsWith("/game_on ") || text.startsWith("/game_off ")) {
+    const on = text.startsWith("/game_on ");
+    const slug = text.slice(on ? 9 : 10).trim();
+    const { error, data } = await supabase.from("games").update({ is_active: on }).eq("slug", slug).select("name");
+    if (error || !data?.length) return await send(`❌ Game <code>${esc(slug)}</code> tidak ditemukan`);
+    await send(`${on ? "🟢" : "🔴"} Game <b>${esc(data[0].name)}</b> ${on ? "muncul di home" : "disembunyikan"}`);
     return;
   }
 
