@@ -10,7 +10,7 @@
 import { supabase } from "./supabase.js";
 import { recheckUniPlayOrder } from "./fulfill.js";
 import { getSaldo } from "./uniplay.js";
-import { pushOrderToSheet, pullPricelist } from "./sheet-sync.js";
+import { pushOrderToSheet, pullPricelist, fetchGifters } from "./sheet-sync.js";
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -234,11 +234,39 @@ export async function notifyFailed(order, reason) {
 }
 
 // ─────────────────────────────────────────────
+// Sky-via-gift: tampilkan daftar gifter buat admin pilih
+// (fetched live dari Apps Script `?action=gifters`, filter yang sisa saldo cukup
+// biar admin ga salah pilih gifter yang saldonya ga cukup).
+// ─────────────────────────────────────────────
+async function showPickGifter(cb, order) {
+  const giftersRes = await fetchGifters();
+  if (!giftersRes?.gifters?.length) {
+    await answerCallback(cb.id, "Gagal fetch gifter list (cek Apps Script)");
+    return;
+  }
+  // Order's total_idr adalah harga jual IDR. USD item = cost / rate_gift terbesar.
+  // Approximation: admin sees sisa_usd di tombol, pilih yang cukup.
+  const buttons = giftersRes.gifters.map((g) => ([
+    { text: `${g.name} — sisa $${g.sisa_usd.toFixed(2)}`, callback_data: `pick_gifter:${order.id}:${g.name}` },
+  ]));
+  const keyboard = { inline_keyboard: buttons };
+  const mid = orderMessageMap.get(order.id) || cb.message?.message_id;
+  const text = `🎁 <b>PILIH GIFTER</b>\n\n${fmtOrder(order)}\n\n<i>Siapa yang kirim gift ini? (pilih yang saldonya cukup)</i>`;
+  if (mid) await editMessage(mid, text, { reply_markup: keyboard });
+  else await send(text, { reply_markup: keyboard });
+  await answerCallback(cb.id, "Pilih gifter dulu");
+}
+
+// ─────────────────────────────────────────────
 // Callback handlers
 // ─────────────────────────────────────────────
 async function handleCallback(cb) {
   const data = cb.data || "";
-  const [action, orderId] = data.split(":");
+  // Format: action:orderId[:extra...] — extra bisa berisi ":" (contoh gifter "SELRA 1")
+  const parts = data.split(":");
+  const action = parts[0];
+  const orderId = parts[1];
+  const extra = parts.slice(2).join(":");
 
   if (!orderId) {
     await answerCallback(cb.id, "Invalid callback");
@@ -340,6 +368,18 @@ async function handleCallback(cb) {
   }
 
   if (action === "mark_done") {
+    // Sky-via-gift wajib pilih gifter dulu sebelum di-mark done (biar sheet
+    // tau mana gifter yang mengirim — modal + saldo terpakai dihitung dari sana).
+    const { data: curOrder } = await supabase.from("orders").select("*").eq("id", orderId).single();
+    if (!curOrder) {
+      await answerCallback(cb.id, "Order not found");
+      return;
+    }
+    if (curOrder.game_slug === "sky-via-gift" && !curOrder.custom_data?.gifter_code) {
+      await showPickGifter(cb, curOrder);
+      return;
+    }
+
     const { data: order } = await supabase
       .from("orders")
       .update({ status: "done", fulfilled_at: new Date().toISOString() })
@@ -351,6 +391,31 @@ async function handleCallback(cb) {
       await answerCallback(cb.id, "Marked DONE ✅");
       await notifyFulfilled(order);
       await pushOrderToSheet(order); // manual done → ORDER WEB
+    } else {
+      await answerCallback(cb.id, "Can't mark done (status ga match)");
+    }
+    return;
+  }
+
+  // Admin pilih gifter untuk sky-via-gift. Simpan ke custom_data.gifter_code
+  // lalu lanjut mark_done (reuse flow).
+  if (action === "pick_gifter") {
+    const gifterName = extra;
+    if (!gifterName) { await answerCallback(cb.id, "Gifter kosong"); return; }
+    const { data: cur } = await supabase.from("orders").select("custom_data").eq("id", orderId).single();
+    if (!cur) { await answerCallback(cb.id, "Order not found"); return; }
+    const newCustom = { ...(cur.custom_data || {}), gifter_code: gifterName };
+    const { data: order } = await supabase
+      .from("orders")
+      .update({ status: "done", fulfilled_at: new Date().toISOString(), custom_data: newCustom })
+      .eq("id", orderId)
+      .in("status", ["paid", "fulfilling"])
+      .select()
+      .single();
+    if (order) {
+      await answerCallback(cb.id, `Gifter ${gifterName} ✓`);
+      await notifyFulfilled(order);
+      await pushOrderToSheet(order);
     } else {
       await answerCallback(cb.id, "Can't mark done (status ga match)");
     }

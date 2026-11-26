@@ -68,6 +68,7 @@ export async function pullPricelist() {
           supplier_sku: item.supplier_sku,
           price_vip_idr: item.price_vip_idr ?? null, // VIP rate swap (NULL = sama dengan price_idr)
           is_available: item.available !== false, // KATALOG WEB passes `available: false` for HABIS rows; legacy PRODUK rows don't set this so default to true
+          sort_order: Number(item.row_index) || 0, // urut sesuai baris sheet (Apps Script kirim row_index)
         },
         { onConflict: "supplier,supplier_sku", ignoreDuplicates: false }
       );
@@ -132,6 +133,9 @@ export async function pushOrderToSheet(order) {
       payment_channel: order.payment_channel || null,
       status: order.status || "done",
       paid_at: order.paid_at || order.fulfilled_at || order.created_at,
+      // Hanya untuk sky-via-gift — admin pilih gifter saat mark done via Telegram.
+      // Apps Script menulis ini ke ORDER WEB kolom T (GIFTER).
+      gifter_code: order.custom_data?.gifter_code || null,
     },
   };
 
@@ -163,6 +167,25 @@ export async function pushOrderToSheet(order) {
   } catch (e) {
     console.error(`Sheet upsert network error [${order.order_code}]:`, e.message);
     return { success: false, message: e.message };
+  }
+}
+
+// ─────────────────────────────────────────────
+// Fetch daftar gifter dari Apps Script — dipakai Telegram bot buat tombol
+// "Pilih Gifter" saat admin fulfill order sky-via-gift.
+// Return: { gifters: [{name, sisa_usd, rate_idr}], count, fetched_at } | null
+// ─────────────────────────────────────────────
+export async function fetchGifters() {
+  if (!APPS_SCRIPT_URL || !APPS_SCRIPT_SECRET) return null;
+  const url = `${APPS_SCRIPT_URL}?action=gifters&key=${encodeURIComponent(APPS_SCRIPT_SECRET)}`;
+  try {
+    const res = await fetch(url, { redirect: "follow" });
+    const data = await res.json();
+    if (data.error) { console.error("Gifters fetch error:", data.error); return null; }
+    return data;
+  } catch (e) {
+    console.error("Gifters fetch network error:", e.message);
+    return null;
   }
 }
 
