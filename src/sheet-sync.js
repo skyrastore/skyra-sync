@@ -2,7 +2,7 @@
 // Google Sheet ↔ Supabase sync (via Apps Script Web App)
 //
 // pullPricelist():    GET Apps Script → upsert products in Supabase
-// pushOrderToSheet(): POST Apps Script → append row to HARIAN tab
+// pushOrderToSheet(): POST Apps Script → upsert row in ORDER WEB tab
 // ═══════════════════════════════════════════════════════════
 
 import { supabase } from "./supabase.js";
@@ -94,41 +94,35 @@ export async function pullPricelist() {
 }
 
 // ─────────────────────────────────────────────
-// Push 1 order (status=done) to HARIAN tab
+// Upsert 1 order to ORDER WEB tab (Apps Script tab bukan HARIAN lagi — Nov 2026)
+// Idempotent per order_code: insert kalau belum ada, kalau sudah ada hanya
+// update STATUS + FEE. Panggil di tiap status change (paid, fulfilling, done,
+// refunded, failed, cancelled). Status pending_payment / expired diabaikan
+// sheet-side kalau belum pernah tercatat.
+//
+// JANGAN kirim custom_data / phone / email customer — modal/USD/laba dihitung
+// di sheet via ARRAYFORMULA matching game_slug + product_name ke PRODUK /
+// KATALOG WEB.
 // ─────────────────────────────────────────────
 export async function pushOrderToSheet(order) {
   if (!APPS_SCRIPT_URL || !APPS_SCRIPT_SECRET) return { success: false };
 
-  // Fetch product cost snapshot
-  let unitCost = 0;
-  if (order.product_id) {
-    const { data: p } = await supabase
-      .from("products")
-      .select("cost_idr")
-      .eq("id", order.product_id)
-      .maybeSingle();
-    unitCost = p?.cost_idr || 0;
-  }
-  const qty = order.qty || 1;
-  const totalModal = unitCost * qty;
-
-  const itemLabel = `${order.game_name} | ${order.product_name}` + (qty > 1 ? ` x${qty}` : "");
-
-  // Map our payment_channel to Sheet BAYAR dropdown values
-  // (BCA / GOPAY POT 1K / GOPAY NON POT / QRIS GOPAY / QRIS DANA / PAYPAL)
-  const bayar = mapBayar(order.payment_channel, order.payment_method);
-
   const body = {
-    action: "append_order",
+    action: "upsert_order",
     key: APPS_SCRIPT_SECRET,
     order: {
-      tanggal: order.fulfilled_at || order.paid_at || order.created_at,
-      nama: order.phone || "Web Customer",
-      item: itemLabel,
-      bayar,
-      jual: order.total_idr,
-      modal: totalModal,
-      nominal: "",
+      order_code: order.order_code,
+      game_slug: order.game_slug,
+      product_name: order.product_name,
+      qty: Number(order.qty) || 1,
+      subtotal_idr: Number(order.subtotal_idr) || 0,
+      voucher_discount_idr: Number(order.voucher_discount_idr) || 0,
+      total_idr: Number(order.total_idr) || 0,
+      fee_idr: Number(order.fee_idr) || 0, // Midtrans fee kalau ada
+      payment_method: order.payment_method || "midtrans",
+      payment_channel: order.payment_channel || null,
+      status: order.status || "done",
+      paid_at: order.paid_at || order.fulfilled_at || order.created_at,
     },
   };
 
@@ -141,28 +135,26 @@ export async function pushOrderToSheet(order) {
     });
     const data = await res.json();
     if (data.error) {
-      console.error(`Sheet push error [${order.order_code}]:`, data.error);
+      console.error(`Sheet upsert error [${order.order_code}]:`, data.error);
       return { success: false, message: data.error };
     }
-    console.log(`📊 Pushed order ${order.order_code} to Sheet row ${data.appended_row}`);
-    return { success: true, row: data.appended_row };
+    const tag = data.action === "inserted"
+      ? `row ${data.row} · modal ${data.modal ?? "?"} · laba ${data.laba ?? "?"}`
+      : data.action === "updated"
+      ? `row ${data.row} → ${data.status}`
+      : data.action === "skipped"
+      ? `skipped (${data.status})`
+      : "ok";
+    console.log(`📊 Sheet upsert ${order.order_code}: ${tag}`);
+    // Warn kalau modal null (berarti PRODUK/KATALOG WEB ga cocok nama/slug-nya)
+    if (data.action === "inserted" && (data.modal === null || data.modal === "" || data.modal === undefined)) {
+      console.warn(`⚠️  ${order.order_code}: modal kosong — product_name "${order.product_name}" ga match di sheet`);
+    }
+    return { success: true, ...data };
   } catch (e) {
-    console.error(`Sheet push network error [${order.order_code}]:`, e.message);
+    console.error(`Sheet upsert network error [${order.order_code}]:`, e.message);
     return { success: false, message: e.message };
   }
-}
-
-// Heuristic mapping Midtrans payment_type → sheet BAYAR dropdown
-function mapBayar(channel, method) {
-  const c = String(channel || "").toLowerCase();
-  if (c.includes("gopay") && c.includes("qris")) return "QRIS GOPAY";
-  if (c.includes("qris")) return "QRIS GOPAY";
-  if (c.includes("gopay")) return "GOPAY NON POT";
-  if (c.includes("bca") || c.includes("va")) return "BCA";
-  if (c.includes("paypal")) return "PAYPAL";
-  if (c === "credit_card" || c === "cc") return "BCA"; // closest fit
-  if (method === "manual") return "QRIS DANA";
-  return "QRIS GOPAY"; // default
 }
 
 // ─────────────────────────────────────────────

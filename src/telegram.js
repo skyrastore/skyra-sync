@@ -275,6 +275,7 @@ async function handleCallback(cb) {
     if (order) {
       await answerCallback(cb.id, "Marked paid ✅");
       await notifyPaid(order);
+      await pushOrderToSheet(order); // insert ke ORDER WEB
     } else {
       await answerCallback(cb.id, `Can't confirm (current: ${existing.status})`);
     }
@@ -293,6 +294,7 @@ async function handleCallback(cb) {
       await answerCallback(cb.id, "Cancelled");
       const mid = orderMessageMap.get(orderId);
       if (mid) await editMessage(mid, `🚫 <b>CANCELLED</b>\n\n${fmtOrder(order)}`, {});
+      await pushOrderToSheet(order); // cancelled → sheet (biar laba = 0)
     }
     return;
   }
@@ -330,6 +332,7 @@ async function handleCallback(cb) {
         ]],
       };
       if (mid) await editMessage(mid, `⚙️ <b>PROCESSING</b>\n\n${fmtOrder(order)}`, { reply_markup: keyboard });
+      await pushOrderToSheet(order); // update sheet status → fulfilling
     } else {
       await answerCallback(cb.id, "Can't set processing (bukan paid)");
     }
@@ -347,7 +350,7 @@ async function handleCallback(cb) {
     if (order) {
       await answerCallback(cb.id, "Marked DONE ✅");
       await notifyFulfilled(order);
-      await pushOrderToSheet(order); // manual done → append to HARIAN
+      await pushOrderToSheet(order); // manual done → ORDER WEB
     } else {
       await answerCallback(cb.id, "Can't mark done (status ga match)");
     }
@@ -364,6 +367,7 @@ async function handleCallback(cb) {
     if (order) {
       await answerCallback(cb.id, "Marked FAILED ❌");
       await notifyFailed(order, "Manual admin override");
+      await pushOrderToSheet(order); // failed → sheet (laba 0)
     }
     return;
   }

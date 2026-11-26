@@ -74,7 +74,10 @@ async function pollPaidOrders() {
     (async () => {
       try {
         const { data: fullOrder } = await supabase.from("orders").select("*").eq("id", o.id).single();
-        if (fullOrder) await notifyPaid(fullOrder);
+        if (fullOrder) {
+          await notifyPaid(fullOrder);
+          await pushOrderToSheet(fullOrder); // insert awal — nanti di-update ke done/failed
+        }
 
         if (isManual) {
           manualNotified.add(o.id);
@@ -92,6 +95,7 @@ async function pollPaidOrders() {
           await pushOrderToSheet(finalOrder); // auto-fulfilled done → sheet
         } else if (finalOrder.status === "failed") {
           await notifyFailed(finalOrder, result.message);
+          await pushOrderToSheet(finalOrder); // failed → sheet (biar laba = 0)
         }
       } catch (e) {
         console.error(`Fulfill ${o.order_code} error:`, e);
