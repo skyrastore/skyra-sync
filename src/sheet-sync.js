@@ -10,6 +10,10 @@ import { supabase } from "./supabase.js";
 const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL;
 const APPS_SCRIPT_SECRET = process.env.APPS_SCRIPT_SECRET;
 
+// Sheet is a REAL financial book — don't pollute with Midtrans sandbox orders.
+// Hera's Claude-chat explicitly asked to gate on MIDTRANS_IS_PRODUCTION.
+const MIDTRANS_IS_PRODUCTION = (process.env.MIDTRANS_ENV || "sandbox").toLowerCase() === "production";
+
 // ─────────────────────────────────────────────
 // Pull pricelist from Sheet → upsert products
 // ─────────────────────────────────────────────
@@ -106,6 +110,10 @@ export async function pullPricelist() {
 // ─────────────────────────────────────────────
 export async function pushOrderToSheet(order) {
   if (!APPS_SCRIPT_URL || !APPS_SCRIPT_SECRET) return { success: false };
+  if (!MIDTRANS_IS_PRODUCTION) {
+    console.log(`📊 Sheet push SKIPPED for ${order.order_code} (sandbox mode — not a real order)`);
+    return { success: true, skipped: "sandbox" };
+  }
 
   const body = {
     action: "upsert_order",
