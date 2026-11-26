@@ -37,6 +37,18 @@ async function syncCategory(categoryLabel, fetcher, category) {
   for (const item of list) {
     // 1. UPSERT game
     const gameSlug = `${category}-${slugify(item.name)}`;
+
+    // Pre-check: for existing games, we DO NOT touch input_fields / input_type.
+    // Form schema for each game is maintained manually (via one-time UniPlay
+    // scrape — different games have different labels: "User ID", "Open ID",
+    // "Role ID", "ID Pemain", etc. Required flags also vary.) Overwriting
+    // every sync tick would clobber the manual mapping.
+    const { data: existingGame } = await supabase
+      .from("games")
+      .select("id")
+      .eq("slug", gameSlug)
+      .maybeSingle();
+
     const gameData = {
       slug: gameSlug,
       name: item.name,
@@ -45,11 +57,6 @@ async function syncCategory(categoryLabel, fetcher, category) {
       image_url: item.image || null,
       color_theme: "default",
       category,
-      input_type: category === "voucher" ? "none" : category === "ppob" ? "user_id" : "user_id",
-      input_fields: category === "voucher" ? [] : [
-        { key: "user_id", label: "User ID", type: "text", required: true },
-        { key: "server_id", label: "Server ID (opsional)", type: "text", required: false },
-      ],
       // Don't populate instructions from publisher website — it's noise on game page.
       // Leave null, use frontend's static badge instead.
       instructions: null,
@@ -57,6 +64,17 @@ async function syncCategory(categoryLabel, fetcher, category) {
       is_featured: false,
       sort_order: 0,
     };
+
+    // Only seed input_fields/input_type on FIRST INSERT (default generic
+    // template). Admin will later edit via SQL to match UniPlay's actual
+    // form schema (see scripts/build-updates.mjs).
+    if (!existingGame) {
+      gameData.input_type = category === "voucher" ? "none" : "user_id";
+      gameData.input_fields = category === "voucher" ? [] : [
+        { key: "user_id", label: "User ID", type: "text", required: true, placeholder: "Masukkan User ID" },
+        { key: "server_id", label: "Server ID (opsional)", type: "text", required: false },
+      ];
+    }
 
     const { data: upsertedGame, error: gameErr } = await supabase
       .from("games")
