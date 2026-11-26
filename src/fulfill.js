@@ -201,13 +201,15 @@ async function fulfillUniPlay(order) {
 
   // ─── Step 2: confirm-payment (actually fulfill, deduct saldo) ───
   let uniplayOrderId;
+  let confirmInfo = {};
   try {
     const confirm = await confirmPayment({ inquiryId, pincode: PINCODE });
     uniplayOrderId = confirm.orderId;
+    confirmInfo = confirm.info || {};
     await appendLog(order.id, {
       action: "confirm_success",
       uniplayOrderId,
-      info: confirm.info,
+      info: confirmInfo,
     });
   } catch (err) {
     // Payment confirm failed — order mungkin tetep ter-charge, perlu cek manual
@@ -220,14 +222,42 @@ async function fulfillUniPlay(order) {
     return { success: false, message: `confirm failed: ${err.message}` };
   }
 
+  // ─── Step 2.5: Token PLN — tangkap kode token dari response ───
+  // UniPlay docs (26 Nov 2026 reply) said trxRespVoucherCode carries the
+  // 20-digit token for PLN prepaid. The /api/orders/[code] page will render
+  // it in a highlighted card so the customer can copy it after paying.
+  // Key name can arrive in snake / camel / all-lowercase — cover all three.
+  const plnToken =
+    confirmInfo.trx_resp_voucher_code ||
+    confirmInfo.trxRespVoucherCode ||
+    confirmInfo.trx_resp_vouchercode ||
+    null;
+  const plnCustomerName = confirmInfo.username || null;
+
+  const doneUpdate = {
+    status: "done",
+    uniplay_order_id: uniplayOrderId,
+    fulfilled_at: new Date().toISOString(),
+  };
+
+  if (plnToken) {
+    // Preserve any customer-supplied custom_data by merging, not overwriting.
+    const { data: curOrder } = await supabase
+      .from("orders")
+      .select("custom_data")
+      .eq("id", order.id)
+      .single();
+    doneUpdate.custom_data = {
+      ...(curOrder?.custom_data || {}),
+      pln_token: plnToken,
+      pln_customer_name: plnCustomerName,
+    };
+  }
+
   // ─── Step 3: mark done ───
   await supabase
     .from("orders")
-    .update({
-      status: "done",
-      uniplay_order_id: uniplayOrderId,
-      fulfilled_at: new Date().toISOString(),
-    })
+    .update(doneUpdate)
     .eq("id", order.id);
 
   await appendLog(order.id, { action: "fulfilled", uniplayOrderId });
