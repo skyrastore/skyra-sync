@@ -97,7 +97,10 @@ export async function getPPOB() {
   const timestamp = getTimestamp();
   const body = { api_key: apiKey, timestamp };
   const data = await uplRequest("/inquiry-ppob", body, token);
-  return data.list_dtu || []; // note: PPOB response pakai key "list_dtu" juga (dari docs)
+  // UniPlay support (26 Nov 2026) clarified: PPOB payload uses `listppob`
+  // (or `list_ppob`), NOT `list_dtu` as we previously assumed. The old
+  // fallback is kept last so any older snapshots still work.
+  return data.listppob || data.list_ppob || data.list_dtu || [];
 }
 
 export async function inquiryPayment({ entitasId, denomId, userId = "", serverId = "" }) {

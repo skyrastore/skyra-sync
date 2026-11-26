@@ -78,10 +78,22 @@ async function syncCategory(categoryLabel, fetcher, category) {
     // form schema (see scripts/build-updates.mjs).
     if (!existingGame) {
       gameData.input_type = category === "voucher" ? "none" : "user_id";
-      gameData.input_fields = category === "voucher" ? [] : [
-        { key: "user_id", label: "User ID", type: "text", required: true, placeholder: "Masukkan User ID" },
-        { key: "server_id", label: "Server ID (opsional)", type: "text", required: false },
-      ];
+      if (category === "voucher") {
+        gameData.input_fields = [];
+      } else if (category === "ppob") {
+        // PPOB (Pulsa, E-Wallet, Token PLN): one field, no server. The
+        // customer types a phone number (for pulsa / e-wallet) or a meter
+        // number (for Token PLN) — the number is pure digits, so the
+        // mobile keyboard should open as a numeric keypad.
+        gameData.input_fields = [
+          { key: "user_id", label: "Nomor Tujuan", type: "tel", required: true, placeholder: "Masukkan nomor HP atau meter", inputmode: "numeric" },
+        ];
+      } else {
+        gameData.input_fields = [
+          { key: "user_id", label: "User ID", type: "text", required: true, placeholder: "Masukkan User ID" },
+          { key: "server_id", label: "Server ID (opsional)", type: "text", required: false },
+        ];
+      }
     }
 
     // Skip game upsert if nothing user-visible changed (name/publisher/image/
