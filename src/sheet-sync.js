@@ -46,8 +46,20 @@ export async function pullPricelist() {
   const { data: games } = await supabase.from("games").select("id, slug").in("slug", slugs);
   const gameBySlug = new Map((games || []).map((g) => [g.slug, g.id]));
 
+  // Pre-fetch current state of every sku we might touch so we can skip no-op
+  // writes. Cutting ~90% of upsert calls here is the quickest way to stop
+  // blowing through Supabase's free-tier log quota (observed >1 GB/mo before).
+  const skus = items.map((i) => i.supplier_sku);
+  const { data: existingRows } = await supabase
+    .from("products")
+    .select("id, supplier_sku, game_id, name, price_idr, cost_idr, price_vip_idr, is_available, sort_order")
+    .eq("supplier", "manual")
+    .in("supplier_sku", skus);
+  const existingBySku = new Map((existingRows || []).map((r) => [r.supplier_sku, r]));
+
   let upserted = 0;
   let skipped = 0;
+  let unchanged = 0;
 
   for (const item of items) {
     const game_id = gameBySlug.get(item.game_slug);
@@ -56,22 +68,38 @@ export async function pullPricelist() {
       continue;
     }
 
+    const next = {
+      game_id,
+      name: item.name,
+      price_idr: item.price_idr,
+      cost_idr: item.cost_idr,
+      supplier: "manual",
+      supplier_sku: item.supplier_sku,
+      price_vip_idr: item.price_vip_idr ?? null, // VIP rate swap (NULL = sama dengan price_idr)
+      is_available: item.available !== false, // KATALOG WEB passes `available: false` for HABIS rows; legacy PRODUK rows don't set this so default to true
+      sort_order: Number(item.row_index) || 0, // urut sesuai baris sheet (Apps Script kirim row_index)
+    };
+
+    // Skip write if nothing user-visible changed. Normalise types since
+    // PostgREST may hand back numeric strings for bigint columns.
+    const cur = existingBySku.get(item.supplier_sku);
+    if (
+      cur &&
+      cur.game_id === next.game_id &&
+      cur.name === next.name &&
+      Number(cur.price_idr) === Number(next.price_idr) &&
+      Number(cur.cost_idr || 0) === Number(next.cost_idr || 0) &&
+      (cur.price_vip_idr == null ? null : Number(cur.price_vip_idr)) === (next.price_vip_idr == null ? null : Number(next.price_vip_idr)) &&
+      !!cur.is_available === !!next.is_available &&
+      Number(cur.sort_order || 0) === Number(next.sort_order || 0)
+    ) {
+      unchanged++;
+      continue;
+    }
+
     const { error } = await supabase
       .from("products")
-      .upsert(
-        {
-          game_id,
-          name: item.name,
-          price_idr: item.price_idr,
-          cost_idr: item.cost_idr,
-          supplier: "manual",
-          supplier_sku: item.supplier_sku,
-          price_vip_idr: item.price_vip_idr ?? null, // VIP rate swap (NULL = sama dengan price_idr)
-          is_available: item.available !== false, // KATALOG WEB passes `available: false` for HABIS rows; legacy PRODUK rows don't set this so default to true
-          sort_order: Number(item.row_index) || 0, // urut sesuai baris sheet (Apps Script kirim row_index)
-        },
-        { onConflict: "supplier,supplier_sku", ignoreDuplicates: false }
-      );
+      .upsert(next, { onConflict: "supplier,supplier_sku", ignoreDuplicates: false });
 
     if (error) {
       console.error(`Product upsert error [${item.supplier_sku}]:`, error.message);
@@ -95,8 +123,8 @@ export async function pullPricelist() {
     }
   }
 
-  console.log(`📊 Sheet pull: ${upserted} upserted, ${skipped} skipped, ${deactivated} deactivated`);
-  return { success: true, upserted, skipped, deactivated };
+  console.log(`📊 Sheet pull: ${upserted} upserted, ${unchanged} unchanged, ${skipped} skipped, ${deactivated} deactivated`);
+  return { success: true, upserted, unchanged, skipped, deactivated };
 }
 
 // ─────────────────────────────────────────────

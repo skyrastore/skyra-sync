@@ -32,22 +32,30 @@ async function syncCategory(categoryLabel, fetcher, category) {
 
   const syncedGameIds = new Set();
   const syncedProductIds = new Set();
-  let newGames = 0, updatedGames = 0, newProducts = 0, updatedProducts = 0;
+  let newGames = 0, updatedGames = 0, unchangedGames = 0, newProducts = 0, updatedProducts = 0, unchangedProducts = 0;
+
+  // Pre-fetch current state of every game and product we may touch this cycle,
+  // so we can skip no-op writes. Each skipped upsert is one less Supabase log
+  // entry — the diff before this change was blowing through Free-tier log
+  // ingestion (~180k product writes/day of mostly identical rows).
+  const allSlugs = list.map((item) => `${category}-${slugify(item.name)}`);
+  const { data: existingGames } = await supabase
+    .from("games")
+    .select("id, slug, name, publisher, image_url, category")
+    .in("slug", allSlugs);
+  const existingGameBySlug = new Map((existingGames || []).map((g) => [g.slug, g]));
+
+  const { data: existingProducts } = await supabase
+    .from("products")
+    .select("id, game_id, supplier_sku, name, price_idr, cost_idr, is_available")
+    .eq("supplier", "uniplay")
+    .in("game_id", (existingGames || []).map((g) => g.id));
+  const existingProductBySku = new Map((existingProducts || []).map((p) => [p.supplier_sku, p]));
 
   for (const item of list) {
     // 1. UPSERT game
     const gameSlug = `${category}-${slugify(item.name)}`;
-
-    // Pre-check: for existing games, we DO NOT touch input_fields / input_type.
-    // Form schema for each game is maintained manually (via one-time UniPlay
-    // scrape — different games have different labels: "User ID", "Open ID",
-    // "Role ID", "ID Pemain", etc. Required flags also vary.) Overwriting
-    // every sync tick would clobber the manual mapping.
-    const { data: existingGame } = await supabase
-      .from("games")
-      .select("id")
-      .eq("slug", gameSlug)
-      .maybeSingle();
+    const existingGame = existingGameBySlug.get(gameSlug);
 
     const gameData = {
       slug: gameSlug,
@@ -76,19 +84,33 @@ async function syncCategory(categoryLabel, fetcher, category) {
       ];
     }
 
-    const { data: upsertedGame, error: gameErr } = await supabase
-      .from("games")
-      .upsert(gameData, { onConflict: "slug", ignoreDuplicates: false })
-      .select("id, created_at")
-      .single();
+    // Skip game upsert if nothing user-visible changed (name/publisher/image/
+    // category). All other sync-maintained fields are constant per sync.
+    let upsertedGame;
+    const gameChanged = !existingGame
+      || existingGame.name !== gameData.name
+      || (existingGame.publisher || null) !== gameData.publisher
+      || (existingGame.image_url || null) !== gameData.image_url
+      || existingGame.category !== gameData.category;
 
-    if (gameErr) {
-      console.error(`  ✗ Game error (${item.name}):`, gameErr.message);
-      continue;
+    if (gameChanged) {
+      const { data: g, error: gameErr } = await supabase
+        .from("games")
+        .upsert(gameData, { onConflict: "slug", ignoreDuplicates: false })
+        .select("id, created_at")
+        .single();
+      if (gameErr) {
+        console.error(`  ✗ Game error (${item.name}):`, gameErr.message);
+        continue;
+      }
+      upsertedGame = g;
+      const isNewGame = new Date(g.created_at) > new Date(Date.now() - 60000);
+      if (isNewGame) newGames++; else updatedGames++;
+    } else {
+      upsertedGame = { id: existingGame.id };
+      unchangedGames++;
     }
     syncedGameIds.add(upsertedGame.id);
-    const isNewGame = new Date(upsertedGame.created_at) > new Date(Date.now() - 60000);
-    if (isNewGame) newGames++; else updatedGames++;
 
     // 2. UPSERT products (denom)
     // supplier_sku = stable NAME-based key: slugify(game_name)--slugify(denom_name)
@@ -119,6 +141,23 @@ async function syncCategory(categoryLabel, fetcher, category) {
         is_available: true,
         sort_order: 0,
       };
+
+      // Skip write if the UniPlay catalog says the same price + name as what's
+      // already in the DB. Most sync cycles leave the vast majority of products
+      // untouched; this is the single biggest log-volume reduction.
+      const curProd = existingProductBySku.get(compositeSku);
+      if (
+        curProd &&
+        curProd.game_id === productData.game_id &&
+        curProd.name === productData.name &&
+        Number(curProd.price_idr) === Number(productData.price_idr) &&
+        Number(curProd.cost_idr || 0) === Number(productData.cost_idr || 0) &&
+        !!curProd.is_available === !!productData.is_available
+      ) {
+        syncedProductIds.add(curProd.id);
+        unchangedProducts++;
+        continue;
+      }
 
       // Upsert by (supplier, supplier_sku) — needs unique index
       const { data: upserted, error } = await supabase
@@ -159,8 +198,8 @@ async function syncCategory(categoryLabel, fetcher, category) {
     }
   }
 
-  console.log(`  📦 Games: +${newGames} new, ~${updatedGames} updated`);
-  console.log(`  🎫 Products: +${newProducts} new, ~${updatedProducts} updated, ❌ ${marked} marked unavailable`);
+  console.log(`  📦 Games: +${newGames} new, ~${updatedGames} updated, ⚡ ${unchangedGames} unchanged`);
+  console.log(`  🎫 Products: +${newProducts} new, ~${updatedProducts} updated, ⚡ ${unchangedProducts} unchanged, ❌ ${marked} marked unavailable`);
 
   return { newGames, updatedGames, newProducts, updatedProducts, marked };
 }
