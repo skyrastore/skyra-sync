@@ -66,6 +66,7 @@ export async function pullPricelist() {
           cost_idr: item.cost_idr,
           supplier: "manual",
           supplier_sku: item.supplier_sku,
+          price_vip_idr: item.price_vip_idr ?? null, // VIP rate swap (NULL = sama dengan price_idr)
           is_available: item.available !== false, // KATALOG WEB passes `available: false` for HABIS rows; legacy PRODUK rows don't set this so default to true
         },
         { onConflict: "supplier,supplier_sku", ignoreDuplicates: false }

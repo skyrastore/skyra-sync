@@ -407,6 +407,10 @@ async function handleCommand(msg) {
         `/voucher_list — voucher aktif\n` +
         `/voucher_new &lt;code&gt; &lt;min&gt; &lt;%&gt; &lt;days&gt;\n` +
         `/voucher_off &lt;code&gt;\n\n` +
+        `<b>⭐ VIP Member</b>\n` +
+        `/vip_on &lt;email&gt; &lt;@ig_handle&gt;\n` +
+        `/vip_off &lt;email&gt;\n` +
+        `/vip_list — daftar VIP aktif\n\n` +
         `<b>📦 Katalog</b>\n` +
         `/stock_off &lt;sku&gt;  /stock_on &lt;sku&gt;\n` +
         `/game_off &lt;slug&gt; /game_on &lt;slug&gt;`
@@ -554,6 +558,92 @@ async function handleCommand(msg) {
     const { error } = await supabase.from("vouchers").update({ is_active: false }).eq("code", code);
     if (error) return await send(`❌ ${esc(error.message)}`);
     await send(`🔒 Voucher <code>${code}</code> dinonaktifkan`);
+    return;
+  }
+
+  // ─── /vip_on <email> <ig_handle> ───
+  // Grant VIP status: create (if not exists) a vip_mode voucher with the IG
+  // handle, scoped to Roblox / Sky / Heartopia, then claim it for the user.
+  // Unlimited use — admin revokes via /vip_off when unfollow detected.
+  const VIP_GAME_SLUGS = ["roblox-login", "roblox-username", "sky-via-id", "sky-via-login", "sky-via-gift", "heartopia"];
+  if (text.startsWith("/vip_on ")) {
+    const parts = text.split(/\s+/);
+    const email = (parts[1] || "").toLowerCase();
+    const igRaw = (parts[2] || "").replace(/^@/, "").trim();
+    if (!email || !igRaw) return await send(`❌ Usage: <code>/vip_on email @ig_handle</code>`);
+    const code = `VIP-${igRaw.toUpperCase().replace(/[^A-Z0-9_]/g, "")}`;
+    const { data: userResp } = await supabase.auth.admin.listUsers();
+    const u = userResp?.users?.find((x) => x.email?.toLowerCase() === email);
+    if (!u) return await send(`❌ User <code>${esc(email)}</code> tidak ditemukan`);
+
+    // Upsert voucher
+    await supabase.from("vouchers").upsert({
+      code,
+      title: `VIP Member — @${igRaw}`,
+      description: `Harga VIP untuk @${igRaw}. Aktif selama follow Instagram @skyra_store2.`,
+      discount_type: "percentage",
+      discount_value: 0,
+      max_discount_idr: null,
+      min_purchase_idr: 0,
+      max_uses: null,
+      per_user_limit: null,
+      is_public: false,
+      is_active: true,
+      vip_mode: true,
+      game_slugs: VIP_GAME_SLUGS,
+    }, { onConflict: "code" });
+
+    // Attach claim for user (ignore if already exists)
+    await supabase.from("vouchers_claimed").upsert({
+      user_id: u.id,
+      voucher_code: code,
+    }, { onConflict: "user_id,voucher_code", ignoreDuplicates: true });
+
+    await send(
+      `⭐ <b>VIP ACTIVATED</b>\n` +
+      `━━━━━━━━━━━━━━━\n` +
+      `User: <code>${esc(email)}</code>\n` +
+      `IG: <b>@${esc(igRaw)}</b>\n` +
+      `Voucher: <code>${code}</code>\n` +
+      `Scope: Roblox, Sky, Heartopia\n` +
+      `Status: 🟢 Aktif (unlimited use)`
+    );
+    return;
+  }
+
+  // ─── /vip_off <email> ───
+  // Revoke: deactivate the user's VIP voucher. Checkout will fall back to NON VIP.
+  if (text.startsWith("/vip_off ")) {
+    const email = text.slice(9).trim().toLowerCase();
+    const { data: userResp } = await supabase.auth.admin.listUsers();
+    const u = userResp?.users?.find((x) => x.email?.toLowerCase() === email);
+    if (!u) return await send(`❌ User <code>${esc(email)}</code> tidak ditemukan`);
+
+    // Find user's claimed vip voucher
+    const { data: claim } = await supabase
+      .from("vouchers_claimed")
+      .select("voucher_code, voucher:vouchers!inner(vip_mode)")
+      .eq("user_id", u.id);
+    const vipClaim = (claim || []).find((c) => c.voucher?.vip_mode);
+    if (!vipClaim) return await send(`ℹ️ ${esc(email)} bukan VIP.`);
+
+    await supabase.from("vouchers").update({ is_active: false }).eq("code", vipClaim.voucher_code);
+    await send(`🔒 VIP revoked: <code>${esc(email)}</code> — voucher <code>${vipClaim.voucher_code}</code> nonaktif`);
+    return;
+  }
+
+  // ─── /vip_list ───
+  if (text === "/vip_list") {
+    const { data: vips } = await supabase
+      .from("vouchers_claimed")
+      .select("user_id, claimed_at, voucher:vouchers!inner(code, title, is_active, vip_mode)")
+      .order("claimed_at", { ascending: false });
+    const active = (vips || []).filter((c) => c.voucher?.vip_mode && c.voucher?.is_active);
+    if (!active.length) return await send("<i>Belum ada VIP member aktif.</i>");
+    const { data: userResp } = await supabase.auth.admin.listUsers();
+    const emailOf = (uid) => userResp?.users?.find((u) => u.id === uid)?.email || uid.slice(0, 8);
+    const lines = active.map((c) => `⭐ <code>${emailOf(c.user_id)}</code> — ${esc(c.voucher.code)}`).join("\n");
+    await send(`<b>👑 VIP Members Aktif (${active.length})</b>\n━━━━━━━━━━━━━━━\n${lines}`);
     return;
   }
 
