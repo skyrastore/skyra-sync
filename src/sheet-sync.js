@@ -52,7 +52,7 @@ export async function pullPricelist() {
   const skus = items.map((i) => i.supplier_sku);
   const { data: existingRows } = await supabase
     .from("products")
-    .select("id, supplier_sku, game_id, name, price_idr, cost_idr, price_vip_idr, is_available, sort_order")
+    .select("id, supplier_sku, game_id, name, price_idr, cost_idr, price_vip_idr, is_available, sort_order, category")
     .eq("supplier", "manual")
     .in("supplier_sku", skus);
   const existingBySku = new Map((existingRows || []).map((r) => [r.supplier_sku, r]));
@@ -68,6 +68,10 @@ export async function pullPricelist() {
       continue;
     }
 
+    // Normalise category: trim + treat empty string as null so change-detection
+    // doesn't flap between "" and NULL every cycle.
+    const nextCategory = (item.category && String(item.category).trim()) || null;
+
     const next = {
       game_id,
       name: item.name,
@@ -78,6 +82,7 @@ export async function pullPricelist() {
       price_vip_idr: item.price_vip_idr ?? null, // VIP rate swap (NULL = sama dengan price_idr)
       is_available: item.available !== false, // KATALOG WEB passes `available: false` for HABIS rows; legacy PRODUK rows don't set this so default to true
       sort_order: Number(item.row_index) || 0, // urut sesuai baris sheet (Apps Script kirim row_index)
+      category: nextCategory, // PRODUK kolom I = KATEGORI WEB (free text, UPPERCASE di sheet)
     };
 
     // Skip write if nothing user-visible changed. Normalise types since
@@ -91,7 +96,8 @@ export async function pullPricelist() {
       Number(cur.cost_idr || 0) === Number(next.cost_idr || 0) &&
       (cur.price_vip_idr == null ? null : Number(cur.price_vip_idr)) === (next.price_vip_idr == null ? null : Number(next.price_vip_idr)) &&
       !!cur.is_available === !!next.is_available &&
-      Number(cur.sort_order || 0) === Number(next.sort_order || 0)
+      Number(cur.sort_order || 0) === Number(next.sort_order || 0) &&
+      (cur.category || null) === next.category
     ) {
       unchanged++;
       continue;
